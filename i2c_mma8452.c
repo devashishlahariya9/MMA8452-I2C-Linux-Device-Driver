@@ -8,6 +8,8 @@
 #include <linux/bitops.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
+#include <linux/jiffies.h>
 
 // BSC register offsets
 #define BSC_C_REG 				0x00
@@ -46,6 +48,9 @@
 struct i2c_peripheral
 {
 	void __iomem *base;
+
+	struct device *dev;
+	struct delayed_work data_fetch_work;
 };
 
 enum i2c_start_mode
@@ -93,6 +98,8 @@ static int i2c_init(struct platform_device *pdev, struct i2c_peripheral **i2c_ou
 	i2c = devm_kzalloc(dev, sizeof(*i2c), GFP_KERNEL);
 	if (!i2c)
 		return -ENOMEM;
+	
+	i2c->dev = dev;
 
 	i2c->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(i2c->base))
@@ -305,6 +312,7 @@ static int i2c_receive_data(struct i2c_peripheral *i2c, u8 *buf, u16 len)
 ///////////////////// MMA8452 specific /////////////////////
 
 #define MMA8452_STATUS_REG			0x00
+#define MMA8452_OUT_X_MSB_REG    	0x01
 #define MMA8452_SYSMOD_REG			0x0B
 #define MMA8452_WHO_AM_I_REG 		0x0D
 #define MMA8452_XYZ_DATA_CFG_REG  	0x0E
@@ -313,6 +321,11 @@ static int i2c_receive_data(struct i2c_peripheral *i2c, u8 *buf, u16 len)
 #define MMA8452_CTRL_REG3			0x2C
 #define MMA8452_CTRL_REG4			0x2D
 #define MMA8452_CTRL_REG5			0x2E
+
+#define MMA8452_STATUS_ZYXDR		BIT(3)
+#define MMA8452_STATUS_ZYXOW		BIT(7)
+
+#define MMA8452_AXIS_DATA_LEN    	6
 
 #define MMA8542_I2C_ADDR 			0x1C
 #define MMA8542_DEVICE_ID			0x2A
@@ -335,6 +348,8 @@ static int i2c_receive_data(struct i2c_peripheral *i2c, u8 *buf, u16 len)
 #define CTRL_REG2_SLPE				BIT(2)
 #define CTRL_REG2_MODS1				BIT(1)
 #define CTRL_REG2_MODS0				BIT(0)
+
+#define MMA8452_FETCH_INTERVAL_MS 	500
 
 typedef enum
 {
@@ -374,6 +389,13 @@ typedef enum
 	MMA8452_OP_MODE_STANDBY = 0,
 	MMA8452_OP_MODE_ACTIVE,
 } eMMA8452_OP_MODE;
+
+typedef struct
+{
+	int16_t x;
+	int16_t y;
+	int16_t z;
+} MMA8452_t;
 
 static int mma8452_read_register(struct device *dev, struct i2c_peripheral *i2c, u8 reg, u8 *value)
 {
@@ -625,6 +647,98 @@ static int mma8452_init(struct device *dev, struct i2c_peripheral *i2c, u8 slave
 	return 0;
 }
 
+static int mma8452_get_readings(struct device *dev,struct i2c_peripheral *i2c, MMA8452_t *readings)
+{
+	u8 status;
+	u8 data[6];
+	int ret;
+	int i;
+
+	if (!dev || !i2c || !readings)
+		return -EINVAL;
+
+	ret = mma8452_read_register(dev, i2c, MMA8452_STATUS_REG, &status);
+	if (ret)
+	{
+		dev_err(dev, "[%s]: Failed to read STATUS: %d\n", __func__, ret);
+		return ret;
+	}
+
+	if (!(status & BIT(3)))
+		return -EAGAIN;
+
+	if (status & BIT(7))
+		dev_warn(dev, "[%s]: Previous acceleration data overwritten\n", __func__);
+
+	for (i = 0; i < 6; i++)
+	{
+		ret = mma8452_read_register(dev, i2c, 0x01 + i, &data[i]);
+		if (ret)
+		{
+			dev_err(dev, "[%s]: Failed to read register 0x%02x: %d\n", __func__, 0x01 + i, ret);
+			return ret;
+		}
+	}
+
+	readings->x = sign_extend32((((u16)data[0] << 8) | data[1]) >> 4, 11);
+	readings->y = sign_extend32((((u16)data[2] << 8) | data[3]) >> 4, 11);
+	readings->z = sign_extend32((((u16)data[4] << 8) | data[5]) >> 4, 11);
+
+	dev_info(dev,
+			 "[%s]: X=%d, Y=%d, Z=%d\n",
+			 __func__,
+			 readings->x,
+			 readings->y,
+			 readings->z);
+
+	return 0;
+}
+
+static void mma8452_data_fetch_work(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+
+	struct i2c_peripheral *i2c = container_of(dwork, struct i2c_peripheral, data_fetch_work);
+
+	struct device *dev = i2c->dev;
+
+	MMA8452_t readings = {0};
+	int ret;
+
+	ret = mma8452_get_readings(dev, i2c, &readings);
+
+	if (ret == -EAGAIN)
+	{
+		dev_dbg(dev,
+				"[%s]: No new acceleration data available\n",
+				__func__);
+	}
+	else if (ret)
+	{
+		dev_err(dev,
+				"[%s]: Failed to fetch readings: %d\n",
+				__func__, ret);
+
+		/*
+		 * Stop polling after an I2C failure.
+		 * The module must be reinitialized before
+		 * further transfers.
+		 */
+		return;
+	}
+
+	schedule_delayed_work(
+		&i2c->data_fetch_work,
+		msecs_to_jiffies(MMA8452_FETCH_INTERVAL_MS));
+}
+
+static void mma8452_cancel_work(void *data)
+{
+	struct i2c_peripheral *i2c = data;
+
+	cancel_delayed_work_sync(&i2c->data_fetch_work);
+}
+
 ///////////////////// Driver callbacks /////////////////////
 
 static int i2c_probe(struct platform_device *pdev)
@@ -639,8 +753,17 @@ static int i2c_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, i2c);
 
-	if (mma8452_init(dev, i2c, MMA8542_I2C_ADDR))
-		return -1;
+	ret = mma8452_init(dev, i2c, MMA8542_I2C_ADDR);
+	if (ret)
+		return ret;
+
+	INIT_DELAYED_WORK(&i2c->data_fetch_work, mma8452_data_fetch_work);
+
+	ret = devm_add_action_or_reset(dev, mma8452_cancel_work, i2c);
+	if (ret)
+		return ret;
+
+	schedule_delayed_work(&i2c->data_fetch_work, msecs_to_jiffies(MMA8452_FETCH_INTERVAL_MS));
 
 	return 0;
 }
