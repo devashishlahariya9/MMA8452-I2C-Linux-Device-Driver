@@ -1,3 +1,14 @@
+/**
+ * @author Devashish Lahariya
+ * @date 25-10-2026
+ * @brief A simple device driver for the MMA8452 3-Axis Accelerometer.
+ * 
+ * @note This software is free and is provided AS IS and comes with no warranty.
+ * Does it work? Yes.
+ * Should you use it in production? No.
+ * Do I take any responsibility for your stuff? Absolutely not.
+ * Feel free to refer this as a learning guide for your own stuff :)
+ */
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
