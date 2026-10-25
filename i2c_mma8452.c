@@ -224,14 +224,26 @@ static int i2c_send_data(struct i2c_peripheral *i2c, const u8 *buf, u16 len)
 	int ret;
 	u16 i;
 
-	if (!buf || !len || len > 16)
+	if (!i2c || !buf || !len || len > 16)
 		return -EINVAL;
 
-	i2c_set_data_length(i2c, len);
+	// Wait until the controller is idle.
+	ret = readl_poll_timeout(i2c->base + BSC_S_REG,
+				 status,
+				 !(status & BIT(BSC_S_TA)),
+				 10, I2C_TIMEOUT_US);
+	if (ret)
+		return ret;
+
+	// Clear previous DONE, ERR, and CLKT flags.
+	i2c_clear_status(i2c);
 
 	// Clear FIFO while preserving controller enable.
 	i2c_write_register(i2c, BSC_C_REG, BIT(BSC_C_I2CEN) | (3U << BSC_C_CLEAR));
 
+	i2c_set_data_length(i2c, len);
+
+	// Fill the TX FIFO before starting transmission.
 	for (i = 0; i < len; i++)
 	{
 		status = i2c_read_register(i2c, BSC_S_REG);
@@ -292,24 +304,76 @@ static int i2c_receive_data(struct i2c_peripheral *i2c, u8 *buf, u16 len)
 
 ///////////////////// MMA8452 specific /////////////////////
 
-#define MMA8452_STATUS_REG		0x00
-#define MMA8452_SYSMOD_REG		0x0B
-#define MMA8452_WHO_AM_I_REG 	0x0D
-#define MMA8452_CTRL_REG1		0x2A
-#define MMA8452_CTRL_REG2		0x2B
-#define MMA8452_CTRL_REG3		0x2C
-#define MMA8452_CTRL_REG4		0x2D
-#define MMA8452_CTRL_REG5		0x2E
+#define MMA8452_STATUS_REG			0x00
+#define MMA8452_SYSMOD_REG			0x0B
+#define MMA8452_WHO_AM_I_REG 		0x0D
+#define MMA8452_XYZ_DATA_CFG_REG  	0x0E
+#define MMA8452_CTRL_REG1			0x2A
+#define MMA8452_CTRL_REG2			0x2B
+#define MMA8452_CTRL_REG3			0x2C
+#define MMA8452_CTRL_REG4			0x2D
+#define MMA8452_CTRL_REG5			0x2E
 
-#define MMA8542_I2C_ADDR 		0x1C
-#define MMA8542_DEVICE_ID		0x2A
+#define MMA8542_I2C_ADDR 			0x1C
+#define MMA8542_DEVICE_ID			0x2A
+
+// CTRL_REG1 Bits
+#define CTRL_REG1_ASLP_RATE1		BIT(7)
+#define CTRL_REG1_ASLP_RATE0		BIT(6)
+#define CTRL_REG1_DR2				BIT(5)
+#define CTRL_REG1_DR1				BIT(4)
+#define CTRL_REG1_DR0				BIT(3)
+#define CTRL_REG1_LNOISE			BIT(2)
+#define CTRL_REG1_F_READ			BIT(1)
+#define CTRL_REG1_ACTIVE			BIT(0)
+
+// CTRL_REG2 Bits
+#define CTRL_REG2_ST				BIT(7)
+#define CTRL_REG2_RST				BIT(6)
+#define CTRL_REG2_SMODS1			BIT(4)
+#define CTRL_REG2_SMODS0			BIT(3)
+#define CTRL_REG2_SLPE				BIT(2)
+#define CTRL_REG2_MODS1				BIT(1)
+#define CTRL_REG2_MODS0				BIT(0)
 
 typedef enum
 {
 	MMA8452_SYS_MODE_STANDBY = 0,
 	MMA8452_SYS_MODE_WAKE,
 	MMA8452_SYS_MODE_SLEEP,
-}eMMA8452_SYS_MODE;
+} eMMA8452_SYS_MODE;
+
+typedef enum
+{
+	MMA8452_ASLP_RATE_50_Hz = 0,
+	MMA8452_ASLP_RATE_12_5_Hz,				// 12.5 Hz
+	MMA8452_ASLP_RATE_6_25_Hz,				// 6.25 Hz
+	MMA8452_ASLP_RATE_1_56_Hz,				// 1.56 Hz
+} eMMA8452_ASLP_RATE;
+
+typedef enum
+{
+	MMA8452_OUT_DATA_RATE_800_Hz = 0,
+	MMA8452_OUT_DATA_RATE_400_Hz,
+	MMA8452_OUT_DATA_RATE_200_Hz,
+	MMA8452_OUT_DATA_RATE_100_Hz,
+	MMA8452_OUT_DATA_RATE_50_Hz,
+	MMA8452_OUT_DATA_RATE_12_5_Hz,			// 12.5 Hz
+	MMA8452_OUT_DATA_RATE_6_25_Hz,			// 6.25 Hz
+	MMA8452_OUT_DATA_RATE_1_56_Hz,			// 1.56 Hz
+} eMMA8452_OUT_DATA_RATE;
+
+typedef enum
+{
+	MMA8452_NOISE_MODE_NORMAL = 0,
+	MMA8452_NOISE_MODE_REDUCED,
+} eMMA8452_NOISE_MODE;
+
+typedef enum
+{
+	MMA8452_OP_MODE_STANDBY = 0,
+	MMA8452_OP_MODE_ACTIVE,
+} eMMA8452_OP_MODE;
 
 static int mma8452_read_register(struct device *dev, struct i2c_peripheral *i2c, u8 reg, u8 *value)
 {
@@ -369,9 +433,9 @@ static int mma8452_read_register(struct device *dev, struct i2c_peripheral *i2c,
 	i2c_set_data_length(i2c, 1);
 
 	i2c_write_register(i2c, BSC_C_REG,
-					   BIT(BSC_C_I2CEN) |
-						   BIT(BSC_C_ST) |
-						   BIT(BSC_C_READ));
+					   		BIT(BSC_C_I2CEN) |
+						   	BIT(BSC_C_ST) |
+						   	BIT(BSC_C_READ));
 
 	ret = readl_poll_timeout_atomic(i2c->base + BSC_S_REG,
 									status,
@@ -422,6 +486,24 @@ reset:
 	return ret;
 }
 
+static int mma8452_write_register(struct device *dev, struct i2c_peripheral *i2c, u8 reg, u8 value)
+{
+    u8 buf[2] = { reg, value };
+    int ret;
+
+    if (!dev || !i2c)
+        return -EINVAL;
+
+    ret = i2c_send_data(i2c, buf, sizeof(buf));
+    if (ret)
+    {
+        dev_err(dev, "[%s]: Failed to write 0x%02x to register 0x%02x: %d\n", __func__, value, reg, ret);
+        return ret;
+    }
+
+    return 0;
+}
+
 static int mma8452_get_system_mode(struct device *dev, struct i2c_peripheral *i2c, eMMA8452_SYS_MODE *mode)
 {
 	u8 reg_value;
@@ -457,15 +539,99 @@ static int mma8452_get_system_mode(struct device *dev, struct i2c_peripheral *i2
 	return 0;
 }
 
+static int mma8452_init(struct device *dev, struct i2c_peripheral *i2c, u8 slave_addr)
+{
+	u8 device_id;
+	u8 ctrl_reg1;
+	u8 ctrl_reg2;
+	u8 xyz_data_cfg;
+	eMMA8452_OUT_DATA_RATE data_rate = MMA8452_OUT_DATA_RATE_100_Hz;
+	eMMA8452_ASLP_RATE sleep_rate = MMA8452_ASLP_RATE_50_Hz;
+	eMMA8452_NOISE_MODE noise_mode = MMA8452_NOISE_MODE_NORMAL;
+	eMMA8452_OP_MODE op_mode = MMA8452_OP_MODE_ACTIVE;
+	int ret;
+
+	if (!dev || !i2c)
+		return -EINVAL;
+
+	i2c_set_slave_address(i2c, slave_addr);
+
+	ret = mma8452_read_register(dev, i2c, MMA8452_WHO_AM_I_REG, &device_id);
+	if (ret)
+		return ret;
+
+	if (device_id != MMA8542_DEVICE_ID)
+	{
+		dev_err(dev, "[%s]: Unexpected device ID: 0x%02x\n", __func__, device_id);
+		return -ENODEV;
+	}
+
+	ret = mma8452_read_register(dev, i2c, MMA8452_CTRL_REG1, &ctrl_reg1);
+	if (ret)
+		return ret;
+
+	ctrl_reg1 &= ~CTRL_REG1_ACTIVE;
+
+	ret = mma8452_write_register(dev, i2c, MMA8452_CTRL_REG1, ctrl_reg1);
+	if (ret)
+		return ret;
+
+	ret = mma8452_read_register(dev, i2c, MMA8452_CTRL_REG2, &ctrl_reg2);
+	if (ret)
+		return ret;
+
+	ctrl_reg2 &= ~CTRL_REG2_SLPE;
+
+	ret = mma8452_write_register(dev, i2c, MMA8452_CTRL_REG2, ctrl_reg2);
+	if (ret)
+		return ret;
+
+	ret = mma8452_read_register(dev, i2c, MMA8452_XYZ_DATA_CFG_REG, &xyz_data_cfg);
+	if (ret)
+		return ret;
+
+	xyz_data_cfg &= ~GENMASK(1, 0);
+
+	ret = mma8452_write_register(dev, i2c, MMA8452_XYZ_DATA_CFG_REG, xyz_data_cfg);
+	if (ret)
+		return ret;
+
+	ctrl_reg1 &= ~(CTRL_REG1_ASLP_RATE1 |
+		       CTRL_REG1_ASLP_RATE0 |
+		       CTRL_REG1_DR2 |
+		       CTRL_REG1_DR1 |
+		       CTRL_REG1_DR0 |
+		       CTRL_REG1_LNOISE |
+		       CTRL_REG1_F_READ |
+		       CTRL_REG1_ACTIVE);
+
+	ctrl_reg1 |= (sleep_rate << 6);
+	ctrl_reg1 |= (data_rate << 3);
+
+	if (noise_mode == MMA8452_NOISE_MODE_REDUCED)
+		ctrl_reg1 |= CTRL_REG1_LNOISE;
+
+	if (op_mode == MMA8452_OP_MODE_ACTIVE)
+		ctrl_reg1 |= CTRL_REG1_ACTIVE;
+
+	ret = mma8452_write_register(dev, i2c, MMA8452_CTRL_REG1, ctrl_reg1);
+	if (ret)
+		return ret;
+
+	dev_info(dev,
+		 "[%s]: MMA8452 initialized successfully (100 Hz, +/-2g, active mode)\n",
+		 __func__);
+
+	return 0;
+}
+
 ///////////////////// Driver callbacks /////////////////////
 
 static int i2c_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct i2c_peripheral *i2c;
-	u8 mma8452_device_id = 0;
 	int ret;
-	eMMA8452_SYS_MODE current_sys_mode = MMA8452_SYS_MODE_STANDBY;
 
 	ret = i2c_init(pdev, &i2c);
 	if (ret)
@@ -473,29 +639,8 @@ static int i2c_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, i2c);
 
-	i2c_set_slave_address(i2c, MMA8542_I2C_ADDR);
-
-	// Verify the Device ID.
-	ret = mma8452_read_register(dev, i2c, MMA8452_WHO_AM_I_REG, &mma8452_device_id);
-	if (ret)
-		return ret;
-
-	dev_info(dev, "[%s]: MMA8452 Device ID: 0x%02X\n", __func__, mma8452_device_id);
-
-	if (mma8452_device_id != MMA8542_DEVICE_ID)
-	{
-		dev_warn(dev, "[%s]: Unexpected MMA8452 device ID\n", __func__);
-		return -ENODEV;
-	}
-
-	dev_info(dev, "[%s]: MMA8452 detected successfully\n", __func__);
-
-	// Get the current system mode.
-	dev_info(dev, "[%s]: Fetching current system mode\n", __func__);
-
-	ret = mma8452_get_system_mode(dev, i2c, &current_sys_mode);
-	if (ret)
-		return ret;
+	if (mma8452_init(dev, i2c, MMA8542_I2C_ADDR))
+		return -1;
 
 	return 0;
 }
