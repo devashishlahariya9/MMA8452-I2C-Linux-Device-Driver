@@ -311,45 +311,45 @@ static int i2c_receive_data(struct i2c_peripheral *i2c, u8 *buf, u16 len)
 
 ///////////////////// MMA8452 specific /////////////////////
 
-#define MMA8452_STATUS_REG			0x00
-#define MMA8452_OUT_X_MSB_REG    	0x01
-#define MMA8452_SYSMOD_REG			0x0B
-#define MMA8452_WHO_AM_I_REG 		0x0D
-#define MMA8452_XYZ_DATA_CFG_REG  	0x0E
-#define MMA8452_CTRL_REG1			0x2A
-#define MMA8452_CTRL_REG2			0x2B
-#define MMA8452_CTRL_REG3			0x2C
-#define MMA8452_CTRL_REG4			0x2D
-#define MMA8452_CTRL_REG5			0x2E
+#define MMA8452_STATUS_REG					0x00
+#define MMA8452_OUT_X_MSB_REG    			0x01
+#define MMA8452_SYSMOD_REG					0x0B
+#define MMA8452_WHO_AM_I_REG 				0x0D
+#define MMA8452_XYZ_DATA_CFG_REG  			0x0E
+#define MMA8452_CTRL_REG1					0x2A
+#define MMA8452_CTRL_REG2					0x2B
+#define MMA8452_CTRL_REG3					0x2C
+#define MMA8452_CTRL_REG4					0x2D
+#define MMA8452_CTRL_REG5					0x2E
 
-#define MMA8452_STATUS_ZYXDR		BIT(3)
-#define MMA8452_STATUS_ZYXOW		BIT(7)
+#define MMA8452_STATUS_ZYXDR				BIT(3)
+#define MMA8452_STATUS_ZYXOW				BIT(7)
 
-#define MMA8452_AXIS_DATA_LEN    	6
+#define MMA8452_AXIS_DATA_LEN    			6
 
-#define MMA8542_I2C_ADDR 			0x1C
-#define MMA8542_DEVICE_ID			0x2A
+#define MMA8542_I2C_ADDR 					0x1C
+#define MMA8542_DEVICE_ID					0x2A
 
 // CTRL_REG1 Bits
-#define CTRL_REG1_ASLP_RATE1		BIT(7)
-#define CTRL_REG1_ASLP_RATE0		BIT(6)
-#define CTRL_REG1_DR2				BIT(5)
-#define CTRL_REG1_DR1				BIT(4)
-#define CTRL_REG1_DR0				BIT(3)
-#define CTRL_REG1_LNOISE			BIT(2)
-#define CTRL_REG1_F_READ			BIT(1)
-#define CTRL_REG1_ACTIVE			BIT(0)
+#define MMA8452_CTRL_REG1_ASLP_RATE1		BIT(7)
+#define MMA8452_CTRL_REG1_ASLP_RATE0		BIT(6)
+#define MMA8452_CTRL_REG1_DR2				BIT(5)
+#define MMA8452_CTRL_REG1_DR1				BIT(4)
+#define MMA8452_CTRL_REG1_DR0				BIT(3)
+#define MMA8452_CTRL_REG1_LNOISE			BIT(2)
+#define MMA8452_CTRL_REG1_F_READ			BIT(1)
+#define MMA8452_CTRL_REG1_ACTIVE			BIT(0)
 
 // CTRL_REG2 Bits
-#define CTRL_REG2_ST				BIT(7)
-#define CTRL_REG2_RST				BIT(6)
-#define CTRL_REG2_SMODS1			BIT(4)
-#define CTRL_REG2_SMODS0			BIT(3)
-#define CTRL_REG2_SLPE				BIT(2)
-#define CTRL_REG2_MODS1				BIT(1)
-#define CTRL_REG2_MODS0				BIT(0)
+#define MMA8452_CTRL_REG2_ST				BIT(7)
+#define MMA8452_CTRL_REG2_RST				BIT(6)
+#define MMA8452_CTRL_REG2_SMODS1			BIT(4)
+#define MMA8452_CTRL_REG2_SMODS0			BIT(3)
+#define MMA8452_CTRL_REG2_SLPE				BIT(2)
+#define MMA8452_CTRL_REG2_MODS1				BIT(1)
+#define MMA8452_CTRL_REG2_MODS0				BIT(0)
 
-#define MMA8452_FETCH_INTERVAL_MS 	500
+#define MMA8452_FETCH_INTERVAL_MS 			500
 
 typedef enum
 {
@@ -561,6 +561,31 @@ static int mma8452_get_system_mode(struct device *dev, struct i2c_peripheral *i2
 	return 0;
 }
 
+static int mma8452_soft_reset(struct device *dev, struct i2c_peripheral *i2c)
+{
+	u8 ctrl_reg2;
+	int ret;
+
+	if (!dev || !i2c)
+		return -EINVAL;
+
+	ret = mma8452_read_register(dev, i2c, MMA8452_CTRL_REG2, &ctrl_reg2);
+	if (ret)
+		return ret;
+
+	ctrl_reg2 |= BIT(6);
+
+	ret = mma8452_write_register(dev, i2c, MMA8452_CTRL_REG2, ctrl_reg2);
+	if (ret)
+		return ret;
+
+	msleep(10);
+
+	dev_info(dev, "[%s]: MMA8452 soft reset requested\n", __func__);
+
+	return 0;
+}
+
 static int mma8452_init(struct device *dev, struct i2c_peripheral *i2c, u8 slave_addr)
 {
 	u8 device_id;
@@ -588,11 +613,17 @@ static int mma8452_init(struct device *dev, struct i2c_peripheral *i2c, u8 slave
 		return -ENODEV;
 	}
 
+	ret = mma8452_soft_reset(dev, i2c);
+	if (ret)
+		return ret;
+
+	msleep(500);
+
 	ret = mma8452_read_register(dev, i2c, MMA8452_CTRL_REG1, &ctrl_reg1);
 	if (ret)
 		return ret;
 
-	ctrl_reg1 &= ~CTRL_REG1_ACTIVE;
+	ctrl_reg1 &= ~MMA8452_CTRL_REG1_ACTIVE;
 
 	ret = mma8452_write_register(dev, i2c, MMA8452_CTRL_REG1, ctrl_reg1);
 	if (ret)
@@ -602,7 +633,7 @@ static int mma8452_init(struct device *dev, struct i2c_peripheral *i2c, u8 slave
 	if (ret)
 		return ret;
 
-	ctrl_reg2 &= ~CTRL_REG2_SLPE;
+	ctrl_reg2 &= ~MMA8452_CTRL_REG2_SLPE;
 
 	ret = mma8452_write_register(dev, i2c, MMA8452_CTRL_REG2, ctrl_reg2);
 	if (ret)
@@ -618,23 +649,23 @@ static int mma8452_init(struct device *dev, struct i2c_peripheral *i2c, u8 slave
 	if (ret)
 		return ret;
 
-	ctrl_reg1 &= ~(CTRL_REG1_ASLP_RATE1 |
-		       CTRL_REG1_ASLP_RATE0 |
-		       CTRL_REG1_DR2 |
-		       CTRL_REG1_DR1 |
-		       CTRL_REG1_DR0 |
-		       CTRL_REG1_LNOISE |
-		       CTRL_REG1_F_READ |
-		       CTRL_REG1_ACTIVE);
+	ctrl_reg1 &= ~(MMA8452_CTRL_REG1_ASLP_RATE1 |
+		       MMA8452_CTRL_REG1_ASLP_RATE0 |
+		       MMA8452_CTRL_REG1_DR2 |
+		       MMA8452_CTRL_REG1_DR1 |
+		       MMA8452_CTRL_REG1_DR0 |
+		       MMA8452_CTRL_REG1_LNOISE |
+		       MMA8452_CTRL_REG1_F_READ |
+		       MMA8452_CTRL_REG1_ACTIVE);
 
 	ctrl_reg1 |= (sleep_rate << 6);
 	ctrl_reg1 |= (data_rate << 3);
 
 	if (noise_mode == MMA8452_NOISE_MODE_REDUCED)
-		ctrl_reg1 |= CTRL_REG1_LNOISE;
+		ctrl_reg1 |= MMA8452_CTRL_REG1_LNOISE;
 
 	if (op_mode == MMA8452_OP_MODE_ACTIVE)
-		ctrl_reg1 |= CTRL_REG1_ACTIVE;
+		ctrl_reg1 |= MMA8452_CTRL_REG1_ACTIVE;
 
 	ret = mma8452_write_register(dev, i2c, MMA8452_CTRL_REG1, ctrl_reg1);
 	if (ret)
